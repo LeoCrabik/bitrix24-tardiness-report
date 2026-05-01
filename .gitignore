@@ -1,0 +1,30 @@
+# Env
+.env
+.env.prod
+.env.local
+
+# Dependencies
+node_modules/
+*/node_modules/
+
+# Build
+dist/
+build/
+*/dist/
+*/build/
+
+# SSL certs
+nginx/ssl/
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
