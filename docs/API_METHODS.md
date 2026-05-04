@@ -6,193 +6,291 @@ Scope: `timeman`, `lists`, `user`, `department`
 
 ## Учёт рабочего времени (timeman)
 
-### `timeman.settings`
-Получить настройки рабочего времени конкретного пользователя.
+### `timeman.timecontrol.reports.get` ⭐ основной метод
+
+Получить историю рабочих дней конкретного пользователя за месяц.
+
+> **Важно:** требует **пользовательский токен** (`callWithUserToken`). С app-токеном возвращает `{"error":"wrong_client"}`.
 
 **Параметры:**
-- `USER_ID` — ID пользователя (необязательно, по умолчанию — текущий)
-
-**Возвращает:**
 | Поле | Тип | Описание |
 |---|---|---|
-| `UF_TIMEMAN` | bool | Включён ли учёт РВ для пользователя |
-| `UF_TM_FREE` | bool | Свободный график |
-| `UF_TM_MAX_START` | string | Максимальное время начала дня `HH:MM:SS` — используется как плановое |
-| `UF_TM_MIN_FINISH` | string | Минимальное время завершения `HH:MM:SS` |
-| `UF_TM_MIN_DURATION` | string | Минимальная длительность рабочего дня |
-| `ADMIN` | bool | Может ли управлять РВ других сотрудников |
+| `USER_ID` | int | ID пользователя |
+| `MONTH` | int | Месяц (1–12) |
+| `YEAR` | int | Год |
 
-**Использование в приложении:** Получить плановое время начала дня (`UF_TM_MAX_START`) и проверить, включён ли timeman для сотрудника (`UF_TIMEMAN`).
+**Возвращает:** `{ report: { days: [...] } }`
+
+Поле `days` — **массив** (не объект с YYYYMMDD-ключами!), ключи `"0"`, `"1"`, `"2"`, ...
+
+Каждый элемент массива:
+| Поле | Тип | Описание |
+|---|---|---|
+| `workday_date_start` | string | Фактическое время начала дня в формате ATOM: `"2026-04-15T09:13:55+03:00"` |
+| `workday_complete` | bool | Завершён ли рабочий день |
+
+**Пример обработки:**
+```js
+const days = report?.report?.days || {};
+for (const dayData of Object.values(days)) {
+  if (!dayData.workday_date_start) continue;
+  const date = dayData.workday_date_start.substring(0, 10); // "2026-04-15"
+  const actualStart = dayData.workday_date_start; // "2026-04-15T09:13:55+03:00"
+  // ...
+}
+```
+
+**Часовой пояс:** `workday_date_start` содержит TZ пользователя (+03:00 для Москвы).  
+При расчёте опоздания нужно добавить тот же TZ к плановому времени, иначе Node.js парсит его как UTC и даёт ошибку в 3 часа:
+```js
+const tzMatch = actualStart.match(/([+-]\d{2}:\d{2})$/);
+const tz = tzMatch ? tzMatch[1] : '+00:00';
+const planStartWithTz = `${date}T${scheduleStart}:00${tz}`;
+const lateMinutes = Math.round((new Date(actualStart) - new Date(planStartWithTz)) / 60000);
+```
 
 ---
 
-### `timeman.open`
-Открыть рабочий день (или продолжить после паузы/завершения).
+### `timeman.settings`
+
+Получить настройки учёта рабочего времени для пользователя.
 
 **Параметры:**
 - `USER_ID` — ID пользователя
 
-**Возвращает:**
+**Ключевые поля ответа:**
 | Поле | Тип | Описание |
 |---|---|---|
-| `STATUS` | string | `OPENED` / `CLOSED` / `PAUSED` / `EXPIRED` |
-| `TIME_START` | datetime | Время начала рабочего дня (ISO 8601 с часовым поясом) |
-| `TIME_FINISH` | datetime | Время завершения (`null` если не завершён) |
+| `UF_TIMEMAN` | bool | Включён ли учёт РВ для пользователя |
+| `UF_TM_MAX_START` | string | Максимальное время начала `HH:MM:SS` |
 
-**Использование в приложении:** Единственный доступный REST-метод для получения фактического времени начала рабочего дня. Если день уже открыт — возвращает `TIME_START` без изменений. Если день не открыт — открывает его (что допустимо: сотрудник не пришёл / очень опоздал).
-
-> **Ограничение:** REST API Битрикс24 не предоставляет read-only метода для чтения истории рабочих дней. Методы `timeman.timecontrol.reports.get` и `timeman.status` в REST API не существуют. События на открытие рабочего дня (`OnTimManOpen` и аналоги) также недоступны через REST.
+**Использование:** Проверка `UF_TIMEMAN` перед импортом — если `false`, пользователь пропускается.
 
 ---
 
 ### `timeman.schedule.get`
-Получить рабочий график по ID.
 
-**Параметры:**
-- `id` — ID графика (обязательно)
-
-**Возвращает (ключевые поля):**
-| Поле | Тип | Описание |
-|---|---|---|
-| `SCHEDULE_TYPE` | string | `FIXED` / `SHIFT` / `FLEXTIME` |
-| `SHIFTS[].WORK_TIME_START` | int | Начало смены в секундах от полуночи |
-| `SHIFTS[].WORK_TIME_END` | int | Конец смены в секундах |
-| `SHIFTS[].WORK_DAYS` | string | Рабочие дни: `"12345"` = Пн-Пт |
-| `SCHEDULE_VIOLATION_RULES.MAX_EXACT_START` | int | Макс. начало в секундах |
-
-**Использование:** Резерв для будущей интеграции с графиком Б24 (в текущей версии не используется).
-
----
-
-### `timeman.timecontrol.reports.settings.get`
-Получить настройки отчётов + роль текущего пользователя.
-
-**Возвращает:**
-| Поле | Тип | Описание |
-|---|---|---|
-| `active` | bool | Модуль активен |
-| `user_id` | int | ID текущего пользователя |
-| `user_admin` | bool | Пользователь — администратор |
-| `user_head` | bool | Пользователь — руководитель |
-| `report_view_type` | string | `none` / `head` / `full` / `simple` |
-
----
-
-### `timeman.timecontrol.reports.users.get`
-Получить список пользователей подразделения.
-
-**Параметры:**
-- `DEPARTMENT_ID` — ID подразделения
+Получить рабочий график по ID. Зарезервирован для будущей интеграции (в текущей версии не используется — плановое время берётся из настроек приложения).
 
 ---
 
 ## Пользователи
 
 ### `user.get`
-Получить список пользователей с фильтрацией.
 
-**Ключевые поля:**
+Получить список пользователей.
+
+**Параметры (фильтры):**
+- `ACTIVE: true` — только активные
+- `USER_TYPE: 'employee'` — только штатные (без гостей и экстранет)
+
+**Ключевые поля ответа:**
 | Поле | Описание |
 |---|---|
 | `ID` | ID пользователя |
 | `NAME`, `LAST_NAME` | Имя и фамилия |
 | `PERSONAL_PHOTO` | Фото |
 | `WORK_POSITION` | Должность |
-| `ACTIVE` | Активен ли пользователь |
-| `ADMIN` | `Y` если администратор портала |
+| `ADMIN` | `"Y"` если администратор портала |
 
 ---
 
-### `department.get`
-Получить список подразделений.
+### `user.admin`
 
-**Возвращает:** `ID`, `NAME`, `PARENT`, `UF_HEAD` (ID руководителя)
+Проверить, является ли владелец токена администратором портала.
+
+> **Важно:** требует **пользовательский токен** (`callWithUserToken`). С app-токеном не отражает реальные права.
+
+**Возвращает:** `true` / `false`
+
+**Использование:**
+```js
+const isAdmin = await callWithUserToken(domain, 'user.admin', {}, userAccessToken);
+```
+
+---
+
+### `user.current`
+
+Получить данные текущего пользователя по его токену.
+
+**Использование:** В middleware `extractContext` для определения `userId` из `x-bitrix-access-token`.
 
 ---
 
 ## Универсальные списки (lists)
 
-### Правила работы с API списков (выявлены опытным путём)
+### Критические особенности (выявлены опытным путём)
 
-| Параметр | Где передаётся | Примечание |
-|---|---|---|
-| `IBLOCK_TYPE_ID` | верхний уровень | всегда `"lists"` |
-| `IBLOCK_CODE` | верхний уровень | в `lists.get` и `lists.add` |
-| `NAME` списка | внутри `FIELDS` | в `lists.add` |
-| `TYPE`, `CODE` поля | внутри `FIELDS` | в `lists.field.add` (не `FIELD_TYPE` / `FIELD_NAME`) |
-| `ELEMENT_CODE` | верхний уровень | обязателен в `lists.element.add` |
-| Значения свойств | plain string | `PROPERTY_FOO: "value"` (не `{ n0: value }`) |
-| Чтение свойств | `el.PROPERTY_FOO?.n0?.VALUE` | так возвращает `lists.element.get` |
+**1. `FILTER: { NAME: '...' }` не работает**  
+`lists.element.get` с фильтром по NAME возвращает все элементы, игнорируя фильтр.  
+Решение: загружать все записи один раз и фильтровать в JS.
+
+**2. Чтение свойств — числовой ключ, значение напрямую**  
+```js
+// Б24 возвращает: { "1572": "value" }
+// НЕ { n0: { VALUE: "..." } }
+function propVal(prop) { return Object.values(prop || {})[0] || ''; }
+```
+
+**3. `lists.element.update` требует все IS_REQUIRED поля**  
+Если поле помечено `IS_REQUIRED: 'Y'` при создании, оно обязательно в каждом update. Иначе — 400.
+
+**4. Значения при add — plain string, при update — тоже plain string**  
+```js
+// Правильно:
+PROPERTY_FOO: 'value'
+// Неправильно (вызывает 400):
+PROPERTY_FOO: { n0: 'value' }
+```
+
+**5. DateTime в Б24 хранится в российском формате**  
+При чтении: `"04.05.2026 09:10:59"` → конвертировать в `"2026-05-04T09:10:59"` для JS/фронта.
+
+**6. `SELECT` обязателен**  
+Без `SELECT` свойства не возвращаются.
+
+---
 
 ### `lists.get`
+
 Проверить существование списка по коду.
 
-**Параметры:** `IBLOCK_TYPE_ID`, `IBLOCK_CODE`
+```js
+callMethod(domain, 'lists.get', { IBLOCK_TYPE_ID: 'lists', IBLOCK_CODE: 'TARDINESS_APP_RECORDS' })
+```
 
 ### `lists.add`
+
 Создать новый универсальный список.
 
-**Параметры:** `IBLOCK_TYPE_ID`, `IBLOCK_CODE`, `FIELDS: { NAME }`
+```js
+callMethod(domain, 'lists.add', {
+  IBLOCK_TYPE_ID: 'lists',
+  IBLOCK_CODE: 'TARDINESS_APP_RECORDS',
+  FIELDS: { NAME: 'Опоздания сотрудников' }
+})
+```
 
 ### `lists.field.add`
-Создать поле списка.
 
-**Параметры:** `IBLOCK_TYPE_ID`, `IBLOCK_ID`, `FIELDS: { NAME, CODE, TYPE, MULTIPLE, IS_REQUIRED, SORT }`
+Создать поле списка. `TYPE` и `CODE` — внутри `FIELDS` (не `FIELD_TYPE` / `FIELD_NAME`).
+
+```js
+callMethod(domain, 'lists.field.add', {
+  IBLOCK_TYPE_ID: 'lists',
+  IBLOCK_ID: listId,
+  FIELDS: { NAME: 'ID сотрудника', CODE: 'USER_ID', TYPE: 'N', MULTIPLE: 'N', IS_REQUIRED: 'Y', SORT: 10 }
+})
+```
 
 **Типы полей:**
 | Код | Описание |
 |---|---|
 | `S` | Строка |
 | `N` | Число |
-| `S:DateTime` | Дата и время |
-| `S:Date` | Только дата |
-| `L` | Список (enum) |
+| `S:DateTime` | Дата и время (хранится как `"DD.MM.YYYY HH:MM:SS"`) |
+| `S:Date` | Только дата (хранится как `"DD.MM.YYYY"`) |
+
+### `lists.field.get`
+
+Получить поля списка. Используется для маппинга `CODE → PROPERTY_ID`:
+
+```js
+const fields = await callMethod(domain, 'lists.field.get', { IBLOCK_TYPE_ID: 'lists', IBLOCK_ID: listId });
+// fields = { "PROPERTY_310": { CODE: "USER_ID", ... }, "PROPERTY_312": { CODE: "DATE", ... } }
+const map = {};
+for (const [fieldId, field] of Object.entries(fields || {})) {
+  if (field.CODE) map[field.CODE] = fieldId; // { USER_ID: 'PROPERTY_310', ... }
+}
+```
 
 ### `lists.element.add`
-Добавить элемент в список.
 
-**Параметры:** `IBLOCK_TYPE_ID`, `IBLOCK_ID`, `ELEMENT_CODE`, `FIELDS: { NAME, PROPERTY_* }`
+Добавить элемент. `ELEMENT_CODE` — обязателен на верхнем уровне. Значения — plain string.
+
+```js
+callMethod(domain, 'lists.element.add', {
+  IBLOCK_TYPE_ID: 'lists',
+  IBLOCK_ID: listId,
+  ELEMENT_CODE: '2026-04-15_user_258',
+  FIELDS: {
+    NAME: '2026-04-15_user_258',
+    PROPERTY_310: '258',   // USER_ID
+    PROPERTY_312: '2026-04-15',
+    // ...
+  }
+})
+```
 
 ### `lists.element.get`
-Получить элементы с фильтрацией.
 
-**Параметры:** `IBLOCK_TYPE_ID`, `IBLOCK_ID`, `FILTER`, `SELECT`
+Получить элементы. `SELECT` обязателен. `FILTER` по NAME не работает — использовать `{}` и фильтровать в JS.
+
+```js
+callMethod(domain, 'lists.element.get', {
+  IBLOCK_TYPE_ID: 'lists',
+  IBLOCK_ID: listId,
+  FILTER: {},
+  SELECT: ['ID', 'NAME', 'PROPERTY_310', 'PROPERTY_312', ...]
+})
+// Чтение: propVal(el['PROPERTY_310']) → "258"
+```
 
 ### `lists.element.update`
-Обновить элемент.
 
-**Параметры:** `IBLOCK_TYPE_ID`, `IBLOCK_ID`, `ELEMENT_ID`, `FIELDS: { PROPERTY_* }`
+Обновить элемент. `NAME` обязателен. Все `IS_REQUIRED: 'Y'` поля обязательны. Plain string.
+
+```js
+callMethod(domain, 'lists.element.update', {
+  IBLOCK_TYPE_ID: 'lists',
+  IBLOCK_ID: listId,
+  ELEMENT_ID: elementId,
+  FIELDS: {
+    NAME: '2026-04-15_user_258',  // обязательно
+    PROPERTY_310: '258',           // USER_ID — IS_REQUIRED, обязательно
+    PROPERTY_312: '2026-04-15',   // DATE — IS_REQUIRED, обязательно
+    // ... все IS_REQUIRED поля ...
+    PROPERTY_320: 'Пробки',        // REASON — обновляемое поле
+  }
+})
+```
 
 ---
 
 ## Настройки приложения
 
 ### `app.option.get` / `app.option.set`
-Хранение глобальных опций приложения (ключ-значение).
 
-**Использование:** Хранить ID созданных при установке списков (`records_list_id`, `settings_list_id`).
+Хранение глобальных опций приложения (ключ-значение, не привязаны к порталу).
+
+**Использование:** Хранить ID созданных при установке списков:
+```js
+await callMethod(domain, 'app.option.set', {
+  options: { records_list_id: '84', settings_list_id: '86' }
+})
+const opts = await callMethod(domain, 'app.option.get', { options: ['records_list_id', 'settings_list_id'] })
+```
 
 ---
 
-## Установка приложения
+## Установка приложения (ONAPPINSTALL)
 
-### `ONAPPINSTALL`
-POST-запрос от Битрикс24 при установке приложения.
+POST-запрос от Битрикс24 на `/bitrix/install` при установке.
 
-**Параметры в теле запроса:**
+**Тело запроса:**
 | Поле | Описание |
 |---|---|
 | `AUTH_ID` | access_token |
 | `REFRESH_ID` | refresh_token |
-| `AUTH_EXPIRES` | Время жизни токена (сек) |
-| `APPLICATION_TOKEN` | Токен приложения (для webhook) |
 | `SERVER_ENDPOINT` | OAuth-эндпоинт (`https://oauth.bitrix24.tech/rest/`) |
-| `member_id` | ID портала |
+| `APPLICATION_TOKEN` | Токен приложения |
+| `member_id` | Уникальный ID портала |
 
 **Алгоритм обработчика:**
 1. Вызвать `app.info` через `SERVER_ENDPOINT` → получить `client_endpoint` и домен портала
-2. Сохранить токены в Redis
-3. Создать универсальные списки (если не существуют)
-4. Создать singleton-запись настроек с дефолтами
+2. Сохранить токены в Redis (`portal:{domain}`)
+3. Создать универсальные списки (если не существуют) + все поля
+4. Создать singleton-запись настроек с дефолтами (если не существует)
 5. Сохранить ID списков через `app.option.set`
-6. Ответить HTML с `BX24.installFinish()`
+6. Ответить HTML с `BX24.installFinish()` — без этого Б24 считает установку незавершённой

@@ -23,15 +23,17 @@
 **Стек:** React + TypeScript (frontend, Vite) / Node.js Express (backend) / Redis (токены)
 
 **Запуск в dev:**
-1. `node proxy.js` — маршрутизатор на :80
-2. `cd backend && node src/index.js` — backend на :3001
-3. `cd frontend && npm run dev` — Vite на :5173
+1. `C:\Temp\redis\redis-server.exe` — Redis
+2. `node proxy.js` — маршрутизатор на :80
+3. `cd backend && node src/index.js` — backend на :3001
 4. `cloudflared tunnel --url http://localhost:80` — HTTPS-туннель
 
+**Frontend:** собирается через `cd frontend && npm run build`. Backend раздаёт `frontend/dist/` напрямую — Vite dev server в работе НЕ используется.
+
 **Маршруты proxy.js:**
-- POST на не-backend маршруты → `303 redirect` (Б24 открывает iframe через POST)
+- POST на не-backend маршруты → `302 redirect` с `bx_auth` в query (Б24 открывает iframe через POST)
 - `/api/*` и `/bitrix/*` → backend `:3001`
-- `/*` → frontend (Vite `:5173`)
+- `/*` → backend `:3001` (который раздаёт `frontend/dist/`)
 
 **Хранилище данных портала — два универсальных списка:**
 | Список | CODE | Назначение |
@@ -47,8 +49,8 @@
 
 | Роль | Как определяется | Что видит |
 |---|---|---|
-| Администратор | `ADMIN=Y` в `user.get` (портальный админ) | `SettingsPage` |
-| Руководитель | USER_ID в `PROPERTY_MANAGERS` в настройках | `ReportPage` + экспорт |
+| Администратор | `user.admin` возвращает `true` (пользовательский токен) | `SettingsPage` |
+| Руководитель | USER_ID в `managers` в настройках | `ReportPage` + экспорт |
 | Сотрудник | Все остальные | `MyTardinessPage` |
 
 Один пользователь может быть одновременно руководителем и администратором.
@@ -59,20 +61,15 @@
 
 | Метод | Зачем |
 |---|---|
-| `timeman.settings` | Проверить включён ли timeman (`UF_TIMEMAN`), получить плановый порог начала дня (`UF_TM_MAX_START`) |
-| `timeman.open` | **Единственный способ** получить фактическое время открытия рабочего дня (`TIME_START`). Если день уже открыт — возвращает без изменений. Если не открыт — открывает |
-| `user.get` | Список сотрудников, проверка `ADMIN=Y` |
+| `timeman.timecontrol.reports.get` | Получить историю рабочих дней за месяц (MONTH, YEAR, USER_ID). Возвращает массив `days` с `workday_date_start` (ATOM). **Требует пользовательский токен** (`callWithUserToken`), с app-токеном возвращает `wrong_client` |
+| `timeman.settings` | Проверить включён ли timeman (`UF_TIMEMAN`) для пользователя |
+| `user.get` | Список сотрудников |
+| `user.admin` | Проверить, является ли владелец токена администратором портала. **Требует пользовательский токен** |
 | `lists.get` | Проверить существование списков при установке |
 | `lists.element.add/get/update` | CRUD записей об опозданиях и настроек |
 | `app.option.get/set` | Хранить ID созданных списков |
 
 **Scopes приложения:** `timeman`, `lists`, `user`, `department`
-
-**⚠️ Подтверждённое ограничение REST API Б24:**
-- `timeman.timecontrol.reports.get` — **не существует**
-- `timeman.status` — **не существует**
-- События типа `OnTimManOpen` — **недоступны через REST**
-- Read-only метода для чтения времени начала рабочего дня нет
 
 ---
 
@@ -81,18 +78,25 @@
 ```
 Пользователь открывает отчёт или страницу своих опозданий:
   → GET /api/report или GET /api/my-tardiness
-  → backend вызывает checkAndRecordTardiness(userId, today, settings):
+  → backend вызывает importTardinessForPeriod(userIds, dateFrom, dateTo, settings):
 
-  1. recordExists(userId, today)? → если да, выйти
-  2. timeman.settings(userId) → UF_TIMEMAN=false? → выйти
-  3. T_plan = UF_TM_MAX_START ?? расписание из PROPERTY_SCHEDULE
-  4. timeman.open(userId) → TIME_START
-     → дата не сегодня? → выйти (день не открыт)
-  5. delta = TIME_START - T_plan (минуты)
-  6. delta > lateThreshold? → создать запись в TARDINESS_APP_RECORDS
+  1. getExistingRecordNames(domain) → Set всех существующих имён записей (ONE API call)
+  2. timeman.settings(userId) → UF_TIMEMAN=false? → пропустить пользователя
+  3. Для каждого месяца в диапазоне:
+     timeman.timecontrol.reports.get(USER_ID, MONTH, YEAR) [пользовательский токен]
+     → days[] с workday_date_start (ATOM: "2026-04-15T09:13:55+03:00")
+  4. Для каждого дня:
+     a. date = workday_date_start.substring(0, 10)
+     b. recordName = "${date}_user_${userId}" → если в Set → пропустить
+     c. planStart = расписание из настроек для этого дня недели
+     d. Взять TZ из actualStart → planStartWithTz = planStart + tz
+     e. lateMinutes = (actualStart - planStartWithTz) / 60 000
+     f. lateMinutes > lateThreshold? → createRecord() + добавить в Set
 ```
 
-**Почему не cron:** нет смысла гонять фоновый процесс, когда единственный доступный метод (`timeman.open`) имеет побочные эффекты и должен вызываться тогда, когда руководитель реально смотрит отчёт — к этому моменту все сотрудники уже открыли (или не открыли) рабочий день.
+**Почему не cron:** on-demand достаточно — когда руководитель смотрит отчёт, все сотрудники уже открыли (или не открыли) рабочий день.
+
+**Важно:** `timeman.open` больше НЕ используется. Исторические данные берутся из `timeman.timecontrol.reports.get`.
 
 ---
 
@@ -130,16 +134,36 @@ callMethod(domain, 'lists.field.add', { IBLOCK_TYPE_ID: 'lists', IBLOCK_ID: id, 
 // lists.element.add — ELEMENT_CODE обязателен на верхнем уровне, значения PROPERTY plain string
 callMethod(domain, 'lists.element.add', { IBLOCK_TYPE_ID: 'lists', IBLOCK_ID: id, ELEMENT_CODE: '...', FIELDS: { NAME, PROPERTY_FOO: 'value' } })
 
-// lists.element.update — NAME обязателен в FIELDS, значения PROPERTY в формате { n0: value }
-callMethod(domain, 'lists.element.update', { IBLOCK_TYPE_ID: 'lists', IBLOCK_ID: id, ELEMENT_ID: id, FIELDS: { NAME, PROPERTY_FOO: { n0: 'value' } } })
+// lists.element.update — NAME обязателен, ВСЕ IS_REQUIRED поля тоже обязательны, plain string
+callMethod(domain, 'lists.element.update', { IBLOCK_TYPE_ID: 'lists', IBLOCK_ID: id, ELEMENT_ID: id, FIELDS: { NAME, PROPERTY_FOO: 'value' } })
 
-// lists.element.get — SELECT: ['ID', 'NAME', 'PROPERTY_*'] обязателен, иначе свойства не возвращаются
-//                    свойства читаются через Object.values(el.PROPERTY_328)[0]
-//                    формат ответа: { "1572": "value" } — числовой ключ, значение напрямую
-//                    НЕ { n0: { VALUE: "..." } } — это неверно!
+// lists.element.get — SELECT обязателен, иначе свойства не возвращаются
+// FILTER: { NAME: '...' } НЕ РАБОТАЕТ (игнорирует фильтр, возвращает все записи)!
+// Поэтому recordExists реализован через Set имён, загруженный один раз.
 callMethod(domain, 'lists.element.get', { IBLOCK_TYPE_ID: 'lists', IBLOCK_ID: id, FILTER: {}, SELECT: ['ID', 'NAME', 'PROPERTY_328', ...] })
-// Хелпер для чтения:
-// function propVal(prop) { return Object.values(prop || {})[0] || ''; }
+
+// Чтение значения из ответа (числовой ключ, значение напрямую):
+function propVal(prop) { return Object.values(prop || {})[0] || ''; }
+// B24 возвращает: { "1572": "value" } — НЕ { n0: { VALUE: "..." } }
+
+// B24 хранит DateTime в формате "DD.MM.YYYY HH:MM:SS" — нужна конвертация в ISO на бэкенде
+```
+
+---
+
+## Часовой пояс — важная деталь
+
+`timeman.timecontrol.reports.get` возвращает `workday_date_start` в формате ATOM с TZ пользователя:
+```
+"2026-04-15T09:13:55+03:00"
+```
+
+При сравнении с плановым временем (`"2026-04-15T09:00:00"`) Node.js парсит строку без TZ как UTC, что даёт ошибку на 3 часа. **Решение:** извлекаем TZ из actualStart и добавляем к planStart:
+
+```js
+const tzMatch = actualStart.match(/([+-]\d{2}:\d{2})$/);
+const tz = tzMatch ? tzMatch[1] : '+00:00';
+const planStartWithTz = planStart + tz; // "2026-04-15T09:00:00+03:00"
 ```
 
 ---
@@ -149,7 +173,7 @@ callMethod(domain, 'lists.element.get', { IBLOCK_TYPE_ID: 'lists', IBLOCK_ID: id
 1. POST `/bitrix/install` от Б24 с `AUTH_ID`, `REFRESH_ID`, `SERVER_ENDPOINT`
 2. Вызвать `app.info` через `SERVER_ENDPOINT` → получить `client_endpoint` и домен
 3. Сохранить токены в Redis
-4. `handleInstall`: создать списки + поля + singleton настроек
+4. `handleInstall`: создать списки + поля + singleton настроек (если не существуют)
 5. Ответить HTML с `BX24.installFinish()` — **обязательно**, иначе Б24 считает установку незавершённой
 
 ---
@@ -162,13 +186,12 @@ bitrix24-tardiness-report/
 │   └── src/
 │       ├── index.js              # Express app, /bitrix/install handler
 │       ├── routes/api.js         # API routes для фронтенда
-│       ├── services/
-│       │   ├── bitrix.client.js  # REST-клиент с авторефрешем токена
-│       │   ├── oauth.service.js  # OAuth2 flow
-│       │   ├── install.handler.js
-│       │   ├── tardiness.service.js  # Вся бизнес-логика + checkAndRecordTardiness
-│       │   └── export.service.js     # ExcelJS
-│       └── storage/redis.js
+│       └── services/
+│           ├── bitrix.client.js  # REST-клиент (callMethod, callWithUserToken, callBatch)
+│           ├── oauth.service.js  # OAuth2 flow + авторефреш
+│           ├── install.handler.js
+│           ├── tardiness.service.js  # Вся бизнес-логика
+│           └── export.service.js     # ExcelJS
 ├── frontend/
 │   └── src/
 │       ├── App.tsx               # Роутинг + определение роли
@@ -179,6 +202,7 @@ bitrix24-tardiness-report/
 │       └── api/client.ts         # fetch-обёртки к backend
 ├── proxy.js                      # Dev-прокси на :80
 ├── docs/                         # Документация
+├── STATUS.md                     # Текущее состояние проекта
 ├── .env
 └── CLAUDE.md
 ```
@@ -191,28 +215,10 @@ bitrix24-tardiness-report/
 - Frontend: ESM, TypeScript strict mode
 - Никаких ORM — прямые вызовы Б24 REST API через `bitrix.client.js`
 - Токены порталов в Redis с ключом `portal:{domain}`
-- Даты в ISO 8601; часовой пояс из `TIME_START` timeman.open содержит смещение пользователя
+- Даты в ISO 8601 на уровне API бэкенда (конвертация из Б24-формата в `normalizeRecord`)
 
 ---
 
-## Статус реализации
+## Что работает / что нет
 
-### Готово ✅
-- OAuth flow + обработчик установки (`/bitrix/install`)
-- Создание универсальных списков при установке
-- `bitrix.client.js` с авторефрешем токена
-- Вся бизнес-логика опозданий (`tardiness.service.js`) включая on-demand проверку
-- API routes (`/api/me`, `/api/report`, `/api/my-tardiness`, `/api/settings`, `/api/report/export`)
-- Frontend: `App.tsx`, `SettingsPage.tsx`, `ReportPage.tsx`, `MyTardinessPage.tsx`
-- Dev proxy с 303-redirect для POST-запросов от Б24
-
-### Не проверено / требует тестирования 🔧
-- Реальная работа `timeman.open` на чужом пользователе (нужны права администратора)
-- Корректность расчёта опозданий с учётом часового пояса (`TIME_START` содержит TZ offset)
-- Экспорт в Excel (`export.service.js`)
-- Сохранение настроек через `SettingsPage`
-
-### Планируется (v2)
-- Учёт производственного календаря (праздники)
-- Интеграция с графиком Б24 (`timeman.schedule.get`) вместо ручного расписания
-- Уведомления руководителю о новых опозданиях
+Актуальный статус — в `STATUS.md`.

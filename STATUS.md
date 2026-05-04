@@ -4,10 +4,10 @@
 
 ---
 
-## Как запустить
+## Как запустить (dev)
 
 ### Требования
-- Node.js (проверить: `node -v`)
+- Node.js 18+
 - Redis: `C:\Temp\redis\redis-server.exe`
 - cloudflared: `cloudflared.exe`
 
@@ -33,21 +33,21 @@ cloudflared tunnel --url http://localhost:80
 ### После получения нового URL туннеля
 
 1. Обновить `.env`: `APP_URL=https://xxxx.trycloudflare.com`
-2. Перезапустить backend (он читает `.env` при старте)
-3. В Битрикс24 → Приложения → твоё приложение → изменить адрес на новый URL
-4. **Переустановить приложение** в Битрикс24 (удалить и установить заново), чтобы получить свежие токены
+2. Перезапустить backend
+3. В Битрикс24 → Приложения → изменить адрес на новый URL
+4. **Переустановить приложение** (удалить и установить заново) — чтобы получить свежие токены
 
 ### Сборка фронтенда (если менял код)
 
 ```bash
 cd frontend
 npm run build
-# Собранный dist автоматически раздаётся backend'ом, Vite НЕ нужен
+# Собранный dist автоматически раздаётся backend'ом
 ```
 
 ---
 
-## Текущая архитектура в dev
+## Текущая архитектура
 
 ```
 Browser → :80 (proxy.js)
@@ -58,7 +58,7 @@ Browser → :80 (proxy.js)
               └── /*             → frontend/dist/ (production build)
 ```
 
-**Vite (`npm run dev`) НЕ используется.** Весь трафик идёт на backend, который раздаёт production build из `frontend/dist/`.
+**Vite dev server НЕ используется.** Фронтенд собирается через `npm run build` и раздаётся бэкендом.
 
 ---
 
@@ -70,53 +70,47 @@ Browser → :80 (proxy.js)
 | Создание универсальных списков при установке | ✅ |
 | OAuth токены в Redis (с автообновлением) | ✅ |
 | Загрузка приложения через Cloudflare туннель | ✅ |
-| Определение роли: admin (`user.admin`), manager, employee | ✅ |
+| Определение роли: admin, manager, employee | ✅ |
 | Навигация по ролям (вкладки) | ✅ |
-| Список сотрудников (без гостей и уволенных) | ✅ |
-| GET /api/settings (чтение настроек) | ✅ |
-
-## Что не работает / не проверено ❌
-
-| Функция | Проблема |
-|---------|---------|
-| **Сохранение настроек** | `lists.element.update` возвращает `true`, но данные не сохраняются |
-| Отчёт по опозданиям | Зависит от настроек — нет trackedUsers, нечего проверять |
-| Запись опоздания через `timeman.open` | Не тестировалось |
-| Excel-экспорт | Не тестировался |
-| Причины опозданий (submit/accept/reject) | Не тестировалось |
+| GET /api/settings — чтение настроек | ✅ |
+| POST /api/settings — сохранение настроек | ✅ |
+| Импорт опозданий за произвольный период (`timeman.timecontrol.reports.get`) | ✅ |
+| Создание записей об опозданиях | ✅ |
+| GET /api/report — отчёт с фильтрами | ✅ |
+| POST /api/my-tardiness/:id/reason — сотрудник указывает причину | ✅ |
+| POST /api/tardiness/:id/reason-status — принять/отклонить причину | ✅ |
+| GET /api/report/export — экспорт в Excel | ✅ |
 
 ---
 
-## Критический баг: настройки не сохраняются
+## Известные особенности / ограничения
 
-### Симптомы
-- `POST /api/settings` возвращает `{ ok: true }`
-- После перезагрузки страницы настройки снова пустые
-- Bitrix24 `lists.element.update` принимает запрос без ошибки, но данные не персистятся
+### FILTER в lists.element.get не работает
+`FILTER: { NAME: '...' }` игнорируется Б24 — возвращает все записи.  
+**Решение:** при импорте один раз загружаем все имена существующих записей в `Set`, проверяем в памяти (`getExistingRecordNames`).
 
-### Что уже пробовали
-1. **Plain strings**: `PROPERTY_328: JSON.stringify(value)` — не работает
-2. **`{ n0: value }` формат**: `PROPERTY_328: { n0: JSON.stringify(value) }` — не работает
-3. **Добавление `NAME: 'settings'`** — обязательно, без него 400, с ним всё равно не сохраняется
+### DateTime в Б24 — российский формат
+Б24 хранит `S:DateTime` поля как `"04.05.2026 09:10:59"` (DD.MM.YYYY HH:MM:SS).  
+**Решение:** `parseRecordDateTime()` в `normalizeRecord` конвертирует в ISO перед отправкой на фронт.
 
-### Что нужно проверить
-- Смотреть бэкенд-логи при сохранении: какие FIELD_ID реально возвращает `lists.field.get`
-- Попробовать CODE-имена в update: `PROPERTY_TRACKED_USERS: { n0: value }` — так же как в `lists.element.add`
-- Проверить через Битрикс24 UI: меняются ли данные в списке после вызова update?
-- Проверить ELEMENT_ID: правильный ли ID возвращает `getSettings`?
+### lists.element.update требует ВСЕ IS_REQUIRED поля
+При обновлении любого поля нужно передавать все поля с `IS_REQUIRED: 'Y'` (USER_ID, DATE, ACTUAL_START, PLAN_START, LATE_MINUTES), иначе — 400.  
+**Решение:** `getRecordById()` читает запись перед обновлением, все поля пробрасываются в FIELDS.
 
-### Где смотреть в коде
+### timeman.timecontrol.reports.get требует пользовательский токен
+С app-токеном возвращает `wrong_client`.  
+**Решение:** `callWithUserToken()` с `x-bitrix-access-token` из заголовка запроса.
 
-- `saveSettings` → `backend/src/services/tardiness.service.js:52`
-- `getSettingsFieldMap` → `backend/src/services/tardiness.service.js:17`
-- Логи бэкенда покажут: `[saveSettings] fieldMap=...` и `[saveSettings] FIELDS sent=...`
+### Экспорт Excel — токен в query params
+Браузер открывает URL через `window.open` без кастомных заголовков.  
+**Решение:** frontend добавляет `?domain=...&token=...` в URL, middleware принимает оба варианта.
 
 ---
 
 ## Структура данных в Битрикс24
 
 ### Список настроек (`TARDINESS_APP_SETTINGS`)
-Singleton-элемент с `NAME='settings'`. Поля:
+Singleton-элемент с `NAME='settings'`, `ELEMENT_CODE='app_settings'`.
 
 | CODE | Тип | Описание |
 |------|-----|---------|
@@ -125,68 +119,26 @@ Singleton-элемент с `NAME='settings'`. Поля:
 | `LATE_THRESHOLD` | N | Порог опоздания в минутах (по умолчанию 5) |
 | `SCHEDULE` | S | JSON расписания (ключи 1-7, ISO день недели) |
 
-**Реальные PROPERTY_ID** (числовые) определяются динамически через `lists.field.get` при каждом вызове.
-
 ### Список записей (`TARDINESS_APP_RECORDS`)
 Каждый элемент = одно опоздание. NAME = `{date}_user_{userId}`.
 
-| CODE | Тип | Описание |
-|------|-----|---------|
-| `USER_ID` | N | ID сотрудника |
-| `DATE` | S:Date | Дата опоздания |
-| `ACTUAL_START` | S:DateTime | Фактическое время начала |
-| `PLAN_START` | S:DateTime | Плановое время начала |
-| `LATE_MINUTES` | N | Минут опоздания |
-| `REASON` | S | Текст причины (заполняет сотрудник) |
-| `REASON_STATUS` | S | `NONE` / `PENDING` / `ACCEPTED` / `REJECTED` |
-| `MANAGER_ID` | N | ID руководителя |
-| `RESOLVED_AT` | S:DateTime | Дата принятия/отклонения |
+| CODE | Тип | IS_REQUIRED | Описание |
+|------|-----|-------------|---------|
+| `USER_ID` | N | Y | ID сотрудника |
+| `DATE` | S:Date | Y | Дата опоздания |
+| `ACTUAL_START` | S:DateTime | Y | Фактическое время начала |
+| `PLAN_START` | S:DateTime | Y | Плановое время начала |
+| `LATE_MINUTES` | N | Y | Минут опоздания |
+| `REASON` | S | N | Текст причины (заполняет сотрудник) |
+| `REASON_STATUS` | S | N | `NONE` / `PENDING` / `ACCEPTED` / `REJECTED` |
+| `MANAGER_ID` | N | N | ID руководителя |
+| `RESOLVED_AT` | S:DateTime | N | Дата принятия/отклонения |
 
 ---
 
-## Особенности API Битрикс24 (выявлено опытным путём)
+## Следующие шаги (v2)
 
-```js
-// lists.element.add — plain string values, ELEMENT_CODE обязателен
-{ IBLOCK_TYPE_ID: 'lists', IBLOCK_ID: id, ELEMENT_CODE: '...', FIELDS: { NAME: '...', PROPERTY_TRACKED_USERS: '[]' } }
-
-// lists.element.update — { n0: value }, NAME обязателен в FIELDS
-{ IBLOCK_TYPE_ID: 'lists', IBLOCK_ID: id, ELEMENT_ID: id, FIELDS: { NAME: '...', PROPERTY_328: { n0: 'value' } } }
-
-// lists.element.get — SELECT обязателен, иначе свойства не возвращаются
-//                    числовые PROPERTY_ID обязательны (CODE-имена не работают)
-{ IBLOCK_TYPE_ID: 'lists', IBLOCK_ID: id, FILTER: {}, SELECT: ['ID', 'NAME', 'PROPERTY_328', ...] }
-
-// Чтение значения из ответа:
-el.PROPERTY_328?.n0?.VALUE
-
-// lists.field.get — возвращает объект { PROPERTY_328: { CODE: 'TRACKED_USERS', ... } }
-// Используем для маппинга CODE → числовой FIELD_ID
-```
-
----
-
-## Файлы изменённые за последнюю сессию
-
-| Файл | Что изменено |
-|------|-------------|
-| `backend/src/services/bitrix.client.js` | Добавлен `callWithUserToken` |
-| `backend/src/services/tardiness.service.js` | `getSettingsFieldMap`, `getRecordsFieldMap`, `getUserRole` через `user.admin`, `getUsers` с фильтром `USER_TYPE: 'employee'` |
-| `backend/src/services/oauth.service.js` | `refreshTokens` сохраняет `server_endpoint` и `member_id` |
-| `backend/src/routes/api.js` | Передача `x-bitrix-access-token` в `getUserRole` |
-| `backend/src/index.js` | Раздача `frontend/dist/` статики + SPA fallback |
-| `frontend/src/App.tsx` | Навигация по вкладкам по роли |
-| `frontend/src/api/client.ts` | `initBX24` через URL params (без `BX24.init()`) |
-| `proxy.js` | Весь трафик → backend `:3001` (убран Vite `:5173`) |
-| `CLAUDE.md` | Обновлены примеры API Б24 |
-
----
-
-## Следующие шаги
-
-1. **Исправить `saveSettings`**: найти правильный формат значений для `lists.element.update`
-   - Смотреть логи: какие FIELD_ID приходят, что отправляется
-   - Попробовать CODE-имена вместо числовых ID
-2. **Проверить отчёт** после починки настроек
-3. Протестировать `timeman.open` на реальных данных
-4. Протестировать Excel-экспорт
+- Учёт производственного календаря (праздники)
+- Интеграция с графиком Б24 (`timeman.schedule.get`) вместо ручного расписания
+- Уведомления руководителю о новых опозданиях
+- Пагинация записей (сейчас грузятся все)
